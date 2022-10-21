@@ -7,41 +7,51 @@
 // #define DEBUG
 // #define TRACE
 
-#define IRpin_PIN               PIND
-#define IRpin                   2
-#define LEDpin                  4
+#define IRpin_PIN                       PIND
+#define IRpin                           2
+#define LEDpin                          4
 
-#define SWITCH_CODE             0x97680707
-#define EXPECTED_REPEATS        10
+#define SWITCH_CODE                     0x97680707
+#define EXPECTED_REPEATS                10
 
 // Timing variables
-#define MICROS_PER_TICK         50
-#define GAP_MICROS              5000
-#define GAP_TICKS               (GAP_MICROS / MICROS_PER_TICK)
+#define MICROS_PER_TICK                 50
+#define GAP_MICROS                      5000
+#define GAP_TICKS                       (GAP_MICROS / MICROS_PER_TICK)
 
 // Samsung protocol variables
-#define SAMSUNG_UNIT            560
-#define SAMSUNG_HEADER_MARK     (8 * SAMSUNG_UNIT)
-#define SAMSUNG_HEADER_SPACE    (8 * SAMSUNG_UNIT)
-#define SAMSUNG_BIT_MARK        SAMSUNG_UNIT
-#define SAMSUNG_ONE_SPACE       (3 * SAMSUNG_UNIT)
-#define SAMSUNG_ZERO_SPACE      SAMSUNG_UNIT
-#define SAMSUNG_MARK_LEVEL      0
-#define SAMSUNG_HEADER_BITS     2
-#define SAMSUNG_DATA_BITS       32
-#define SAMSUNG_STOP_BITS       1
-#define BIT_DURATION_THRESHOLD  20    // Threshold for each bit duration in microseconds
+#define SAMSUNG_UNIT                    560
 
-#define IR_STATE_IDLE           0
-#define IR_STATE_MARK           1
-#define IR_STATE_SPACE          2
-#define IR_STATE_STOP           4
+#define SAMSUNG_HEADER_MARK             (8 * SAMSUNG_UNIT)
+#define SAMSUNG_HEADER_MARK_TICKS_LOW   ((SAMSUNG_HEADER_MARK / MICROS_PER_TICK) * 0.75)
+#define SAMSUNG_HEADER_MARK_TICKS_HIGH  ((SAMSUNG_HEADER_MARK / MICROS_PER_TICK) * 1.25)
+#define SAMSUNG_HEADER_SPACE            (8 * SAMSUNG_UNIT)
+#define SAMSUNG_HEADER_SPACE_TICKS_LOW  ((SAMSUNG_HEADER_SPACE / MICROS_PER_TICK) * 0.75)
+#define SAMSUNG_HEADER_SPACE_TICKS_HIGH ((SAMSUNG_HEADER_SPACE / MICROS_PER_TICK) * 1.25)
 
-#define RAW_BUFFER_LENGTH 100
- 
-uint16_t rawData[RAW_BUFFER_LENGTH];    // tick count at a transition
+#define SAMSUNG_BIT_MARK                SAMSUNG_UNIT
+#define SAMSUNG_BIT_MARK_TICKS          (SAMSUNG_BIT_MARK / MICROS_PER_TICK)
+#define SAMSUNG_BIT_MARK_TICKS_LOW      (SAMSUNG_BIT_MARK_TICKS * 0.75)
+#define SAMSUNG_BIT_MARK_TICKS_HIGH     (SAMSUNG_BIT_MARK_TICKS * 1.25)
+
+#define SAMSUNG_ONE_SPACE               (3 * SAMSUNG_UNIT)
+#define SAMSUNG_ONE_SPACE_TICKS         (SAMSUNG_ONE_SPACE / MICROS_PER_TICK)
+#define SAMSUNG_ONE_SPACE_TICKS_LOW     (SAMSUNG_ONE_SPACE_TICKS * 0.75)
+#define SAMSUNG_ONE_SPACE_TICKS_HIGH    (SAMSUNG_ONE_SPACE_TICKS * 1.25)
+
+#define SAMSUNG_ZERO_SPACE              SAMSUNG_UNIT
+#define SAMSUNG_ZERO_SPACE_TICKS        (SAMSUNG_ZERO_SPACE / MICROS_PER_TICK)
+#define SAMSUNG_ZERO_SPACE_TICKS_LOW    (SAMSUNG_ZERO_SPACE_TICKS * 0.75)
+#define SAMSUNG_ZERO_SPACE_TICKS_HIGH   (SAMSUNG_ZERO_SPACE_TICKS * 1.25)
+
+#define SAMSUNG_MARK_LEVEL              0
+
+#define IR_STATE_IDLE                   0
+#define IR_STATE_MARK                   1
+#define IR_STATE_SPACE                  2
+#define IR_STATE_STOP                   4
+
 uint8_t rawLength = 0;                  // index for pulses we're storing
-uint8_t currentPulseIndex = 0;          // index for pulses we're storing
 
 uint8_t currentState = IR_STATE_IDLE;
 uint8_t tickCount = 0;
@@ -50,6 +60,13 @@ uint8_t currentIRLevel = 0;
 uint32_t decodedResult = 0;
 uint8_t switchCodeRepetitions = 0;
 uint16_t switchCodeGapCount = 0;
+
+uint32_t mask = 1UL;
+
+bool receivingHeader = false;
+bool headerMarkValid = true;
+bool headerSpaceValid = true;
+bool codeValid = true;
 
 void setup(void) {
   Serial.begin(115200);
@@ -73,26 +90,68 @@ void loop(void) {
       if (tickCount > GAP_TICKS) {
         // start of SIGNAL
         currentState = IR_STATE_MARK;
+        receivingHeader = true;
+        codeValid = true;
         rawLength = 0;
+        decodedResult = 0;
+        mask = 1UL;
       }
       tickCount = 0;
     }
   } else if (currentState == IR_STATE_MARK) {
     if (currentIRLevel != SAMSUNG_MARK_LEVEL) {
-      // start of SPACE
+      if (receivingHeader) {
+        // end of header mark, validate it
+        headerMarkValid = tickCount >= SAMSUNG_HEADER_MARK_TICKS_LOW && 
+                          tickCount <= SAMSUNG_HEADER_MARK_TICKS_HIGH;
+      } else {
+        // end of mark, validate mark
+        if (tickCount < SAMSUNG_BIT_MARK_TICKS_LOW || tickCount > SAMSUNG_BIT_MARK_TICKS_HIGH) {
+#if defined(TRACE)
+          Serial.print("mark invalid ");
+          Serial.print(rawLength);
+          Serial.print(" ");
+          Serial.println(tickCount);
+#endif
+          codeValid = false;
+        }
+      }
+
       currentState = IR_STATE_SPACE;
-      rawData[rawLength++] = tickCount;
+      rawLength++;
       tickCount = 0;
     }
   } else if (currentState == IR_STATE_SPACE) {
     if (currentIRLevel == SAMSUNG_MARK_LEVEL) {
-      if (rawLength >= RAW_BUFFER_LENGTH) {
+      if (rawLength >= 100) {
         // overflow
         currentState = IR_STATE_STOP;
       } else {
-        // start of MARK
+        if (receivingHeader) {
+          // end of header space, validate it
+          headerSpaceValid = tickCount >= SAMSUNG_HEADER_SPACE_TICKS_LOW && 
+                             tickCount <= SAMSUNG_HEADER_SPACE_TICKS_HIGH;
+          receivingHeader = false;
+        } else {
+          // end of bit space, validate space
+          if (tickCount >= SAMSUNG_ZERO_SPACE_TICKS_LOW && tickCount <= SAMSUNG_ZERO_SPACE_TICKS_HIGH) {
+            // zero bit, do nothing
+          } else  if (tickCount >= SAMSUNG_ONE_SPACE_TICKS_LOW && tickCount <= SAMSUNG_ONE_SPACE_TICKS_HIGH) {
+            // one bit, set it to result
+            decodedResult |= mask;
+          } else {
+#if defined(TRACE)
+            Serial.print("space invalid ");
+            Serial.print(rawLength);
+            Serial.print(" ");
+            Serial.println(tickCount);
+#endif
+            codeValid = false;
+          }
+          mask <<= 1;
+        }
         currentState = IR_STATE_MARK;
-        rawData[rawLength++] = tickCount;
+        rawLength++;
         tickCount = 0;
       }
     } else if (tickCount > GAP_TICKS) {
@@ -100,36 +159,32 @@ void loop(void) {
     }
   } else if (currentState == IR_STATE_STOP) {
     // validate and decode signal
-    if (rawLength == (SAMSUNG_HEADER_BITS + (2 * SAMSUNG_DATA_BITS) + SAMSUNG_STOP_BITS) && validateHeader()) {
-
-      if (decode()) {
-#if defined(DEBUG)
-        Serial.println(decodedResult, HEX);
-#endif
-        if (decodedResult == SWITCH_CODE) {
 #if defined(TRACE)
-          for (int i = 0; i < rawLength; i++) {
-            Serial.print(rawData[i] * 50);
-            Serial.print(" ");
-            Serial.println(rawData[++i] * 50);
-          }
-          Serial.println();
+      Serial.print("raw length: ");
+      Serial.println(rawLength);
+      Serial.print("header valid: ");
+      Serial.println(headerMarkValid && headerSpaceValid);
+      Serial.print("code valid: ");
+      Serial.println(codeValid);
 #endif
-          if (switchCodeGapCount * MICROS_PER_TICK > 35000) {
-            switchCodeRepetitions = 0;
-          } 
-          switchCodeGapCount = 0;
-        
-          switchCodeRepetitions++;
-          if (switchCodeRepetitions == EXPECTED_REPEATS) {
-            switchCodeRepetitions = 0;
-            switchCodeGapCount = 0;
-            doAction();
-          }
-        } else {
+    // signal length: header 2 bits + data: 2*32 bits + one stop bit
+    if (rawLength == 67 && headerMarkValid && headerSpaceValid && codeValid) {
 #if defined(DEBUG)
-          Serial.println("decode error");
+      Serial.print("Decoded signal: ");
+      Serial.println(decodedResult, HEX);
+      Serial.println();
 #endif
+      if (decodedResult == SWITCH_CODE) {
+        if (switchCodeGapCount * MICROS_PER_TICK > 35000) {
+          switchCodeRepetitions = 0;
+        } 
+        switchCodeGapCount = 0;
+      
+        switchCodeRepetitions++;
+        if (switchCodeRepetitions == EXPECTED_REPEATS) {
+          switchCodeRepetitions = 0;
+          switchCodeGapCount = 0;
+          doAction();
         }
       }
     }
@@ -141,90 +196,6 @@ void loop(void) {
   }
 
   delayMicroseconds(MICROS_PER_TICK);
-}
-
-/**
- * Decode bits LSB
-*/
-bool decode() {
-  uint32_t mask = 1UL;
-  decodedResult = 0;
-
-  int index = 2;
-  for (uint_fast8_t i = 0; i < SAMSUNG_DATA_BITS; i++) {
-    if (!matchMark(index)) {
-      return false;
-    }
-
-    index++;
-    if (matchSpace(index, SAMSUNG_ONE_SPACE)) {
-      // '1' bit
-      decodedResult |= mask;
-    } else if (matchSpace(index, SAMSUNG_ZERO_SPACE)) {
-      // '0' bit, do nothing
-    } else {
-      // no match
-      return false;
-    }
-
-    index++;
-    mask <<= 1;
-  }
-  
-  return true;
-}
-
-/**
- * Check if header of received signal matches
-*/
-bool validateHeader() {
-  // check header mark
-  // number of ticks should be more than 75% and less that 125% of the expected ticks
-  if ((rawData[0] < (SAMSUNG_HEADER_MARK / MICROS_PER_TICK) * 0.75) ||
-      (rawData[0] > (SAMSUNG_HEADER_MARK / MICROS_PER_TICK) * 1.25)) {
-      return false;
-  }
-
-  // check header space
-  // number of ticks should be more than 75% and less that 125% of the expected ticks
-  if ((rawData[1] < (SAMSUNG_HEADER_SPACE / MICROS_PER_TICK) * 0.75) ||
-      (rawData[1] > (SAMSUNG_HEADER_SPACE / MICROS_PER_TICK) * 1.25)) {
-      return false;
-  }
-
-  return true;
-}
-
-bool matchMark(int atIndex) {
-  // check signal mark
-  // number of ticks should be more than 75% and less that 125% of the expected ticks
-  if ((rawData[atIndex] < (SAMSUNG_BIT_MARK / MICROS_PER_TICK) * 0.75) ||
-      (rawData[atIndex] > (SAMSUNG_BIT_MARK / MICROS_PER_TICK) * 1.25)) {
-#if defined(TRACE)
-      Serial.print("Mark expected at index ");
-      Serial.print(atIndex);
-      Serial.print(" but was ");
-      Serial.println(rawData[atIndex]);
-#endif
-      return false;
-  }
-  return true;
-}
-
-bool matchSpace(int atIndex, int length) {
-  // check signal space
-  // number of ticks should be more than 75% and less that 125% of the expected ticks
-  if ((rawData[atIndex] < (length / MICROS_PER_TICK) * 0.75) ||
-      (rawData[atIndex] > (length / MICROS_PER_TICK) * 1.25)) {
-#if defined(TRACE)
-      Serial.print("Space expected at index ");
-      Serial.print(atIndex);
-      Serial.print(" but was ");
-      Serial.println(rawData[atIndex]);
-#endif
-      return false;
-  }
-  return true;
 }
 
 void doAction() {
