@@ -66,7 +66,6 @@ uint32_t mask = 1UL;
 bool receivingHeader = false;
 bool headerMarkValid = true;
 bool headerSpaceValid = true;
-bool codeValid = true;
 
 void setup(void) {
   Serial.begin(115200);
@@ -91,7 +90,6 @@ void loop(void) {
         // start of SIGNAL
         currentState = IR_STATE_MARK;
         receivingHeader = true;
-        codeValid = true;
         rawLength = 0;
         decodedResult = 0;
         mask = 1UL;
@@ -104,19 +102,8 @@ void loop(void) {
         // end of header mark, validate it
         headerMarkValid = tickCount >= SAMSUNG_HEADER_MARK_TICKS_LOW && 
                           tickCount <= SAMSUNG_HEADER_MARK_TICKS_HIGH;
-      } else {
-        // end of mark, validate mark
-        if (tickCount < SAMSUNG_BIT_MARK_TICKS_LOW || tickCount > SAMSUNG_BIT_MARK_TICKS_HIGH) {
-#if defined(TRACE)
-          Serial.print("mark invalid ");
-          Serial.print(rawLength);
-          Serial.print(" ");
-          Serial.println(tickCount);
-#endif
-          codeValid = false;
-        }
       }
-
+      // mark received, assume it's valid
       currentState = IR_STATE_SPACE;
       rawLength++;
       tickCount = 0;
@@ -133,21 +120,12 @@ void loop(void) {
                              tickCount <= SAMSUNG_HEADER_SPACE_TICKS_HIGH;
           receivingHeader = false;
         } else {
-          // end of bit space, validate space
-          if (tickCount >= SAMSUNG_ZERO_SPACE_TICKS_LOW && tickCount <= SAMSUNG_ZERO_SPACE_TICKS_HIGH) {
-            // zero bit, do nothing
-          } else  if (tickCount >= SAMSUNG_ONE_SPACE_TICKS_LOW && tickCount <= SAMSUNG_ONE_SPACE_TICKS_HIGH) {
+          // end of space, if duration is more than 1000us (20 * 50), consider it a one
+          // otherwise who cares, stay at 0
+          if (tickCount >= 20) {
             // one bit, set it to result
             decodedResult |= mask;
-          } else {
-#if defined(TRACE)
-            Serial.print("space invalid ");
-            Serial.print(rawLength);
-            Serial.print(" ");
-            Serial.println(tickCount);
-#endif
-            codeValid = false;
-          }
+          } 
           mask <<= 1;
         }
         currentState = IR_STATE_MARK;
@@ -158,24 +136,21 @@ void loop(void) {
       currentState = IR_STATE_STOP;
     }
   } else if (currentState == IR_STATE_STOP) {
-    // validate and decode signal
 #if defined(TRACE)
       Serial.print("raw length: ");
       Serial.println(rawLength);
       Serial.print("header valid: ");
       Serial.println(headerMarkValid && headerSpaceValid);
-      Serial.print("code valid: ");
-      Serial.println(codeValid);
 #endif
     // signal length: header 2 bits + data: 2*32 bits + one stop bit
-    if (rawLength == 67 && headerMarkValid && headerSpaceValid && codeValid) {
+    if (rawLength == 67 && headerMarkValid && headerSpaceValid) {
 #if defined(DEBUG)
       Serial.print("Decoded signal: ");
       Serial.println(decodedResult, HEX);
       Serial.println();
 #endif
       if (decodedResult == SWITCH_CODE) {
-        if (switchCodeGapCount * MICROS_PER_TICK > 35000) {
+        if (switchCodeGapCount > 10000) {
           switchCodeRepetitions = 0;
         } 
         switchCodeGapCount = 0;
